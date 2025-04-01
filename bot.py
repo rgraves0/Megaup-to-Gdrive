@@ -2,7 +2,8 @@ import os
 import urllib.parse
 import requests
 import telegram
-from telegram.ext import Application, CommandHandler, MessageHandler, Filters
+from telegram.ext import Application, CommandHandler, MessageHandler
+from telegram.ext import filters
 
 # Telegram Bot Token ကို environment variable ကနေ ဖတ်ပါမယ်
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -47,7 +48,7 @@ async def handle_message(update, context):
 
 # Add handlers to the application
 app.add_handler(CommandHandler("start", start))
-app.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
+app.add_handler(MessageHandler(filters.Text() & ~filters.Command(), handle_message))
 
 # Set up webhook
 async def set_webhook():
