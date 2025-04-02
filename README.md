@@ -20,7 +20,7 @@ Before setting up the bot, ensure you have the following:
 ### 1. Clone the Repository
 Clone this repository to your local machine:
 ```bash
-git clone [https://github.com/rgraves0/Megaup-to-Gdrive-Telegram-Bot.git]
+git clone https://github.com/rgraves0/Megaup-to-Gdrive-Telegram-Bot.git
 cd Megaup-to-Gdrive-Telegram-Bot
 
 ## 2. Install Dependencies
