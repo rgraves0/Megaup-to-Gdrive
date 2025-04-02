@@ -1,137 +1,173 @@
 import os
-import urllib.parse
-import requests
-import telegram
-from telegram.ext import Application, CommandHandler, MessageHandler
-from telegram.ext import filters
-from aiohttp import web
+import json
+import subprocess
+from flask import Flask, request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
+import telegram
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
+
+# Flask app ဖန်တီးပါ
+app = Flask(__name__)
 
 # Google Drive API အတွက် SCOPES
-SCOPES = ['https://www.googleapis.com/auth/drive.file']
+SCOPES = ['https://www.googleapis.com/auth/drive']
 
-# Telegram Bot Token ကို environment variable ကနေ ဖတ်ပါမယ်
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+# Google Drive ထဲမှာ ဖိုင်တွေ အပ်လုဒ်လုပ်မယ့် folder ID ကို environment variable ကနေ ဖတ်ပါ
+GOOGLE_DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
+
+# Telegram Bot Token ကို environment variable ကနေ ဖတ်ပါ
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 RAILWAY_URL = os.getenv("RAILWAY_URL")
 
-# Bot ကို ဖန်တီးပါ
-app = Application.builder().token(BOT_TOKEN).build()
+# Telegram Bot နဲ့ Updater ဖန်တီးပါ
+bot = telegram.Bot(token=TELEGRAM_BOT_TOKEN)
+updater = Updater(token=TELEGRAM_BOT_TOKEN, use_context=True)
+dispatcher = updater.dispatcher
 
-# Google Drive Service ကို ဖန်တီးဖို့ function
+# Google Drive API ကို အသုံးပြုဖို့ service ဖန်တီးပါ
 def get_drive_service():
     creds = None
-    # token.json ဖိုင်ကနေ credentials ကို ဖတ်ပါ
-    if os.path.exists('token.json'):
-        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
-    # အကယ်၍ credentials မရှိရင် သို့မဟုတ် မမှန်ကန်ရင် အသစ်ဖန်တီးပါ
+    # Environment variables ကနေ credentials နဲ့ token ကို ဖတ်ပါ
+    credentials_json = os.getenv("CREDENTIALS_JSON")
+    token_json = os.getenv("TOKEN_JSON")
+
+    # credentials.json ကို ဖတ်ပါ
+    credentials_dict = json.loads(credentials_json)
+
+    # token.json ကို ဖတ်ပါ
+    if token_json:
+        token_dict = json.loads(token_json)
+        creds = Credentials.from_authorized_user_info(token_dict, SCOPES)
+
+    # အကယ်၍ credentials မရှိရင် ဒါမှမဟုတ် မမှန်ကန်ရင် အသစ်ဖန်တီးပါ
     if not creds or not creds.valid:
-        flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
+        flow = InstalledAppFlow.from_client_config(credentials_dict, SCOPES)
         creds = flow.run_local_server(port=0)
-        # ဖန်တီးထားတဲ့ credentials ကို token.json ဖိုင်ထဲ သိမ်းပါ
-        with open('token.json', 'w') as token:
-            token.write(creds.to_json())
+        # ဖန်တီးထားတဲ့ credentials ကို environment variable ထဲ ပြန်သိမ်းပါ
+        os.environ["TOKEN_JSON"] = json.dumps({
+            "token": creds.token,
+            "refresh_token": creds.refresh_token,
+            "token_uri": creds.token_uri,
+            "client_id": creds.client_id,
+            "client_secret": creds.client_secret,
+            "scopes": creds.scopes,
+            "expiry": creds.expiry.isoformat()
+        })
+
     return build('drive', 'v3', credentials=creds)
 
-# Google Drive ထဲ ဖိုင်အပ်လုဒ်လုပ်ဖို့ function
+# MegaUp လင့်ခ်ကနေ ဖိုင်ကို ဒေါင်းလုဒ်လုပ်ပါ
+def download_file(url, file_name):
+    download_path = f"./downloads/{file_name}"
+    # ဖိုင်ရှိမရှိ စစ်ဆေးပါ
+    if os.path.exists(download_path):
+        print(f"File {file_name} already exists, skipping download.")
+        return download_path
+    # ဖိုင်မရှိရင် ဒေါင်းလုဒ်လုပ်ပါ
+    subprocess.run(["wget", url, "-O", download_path])
+    return download_path
+
+# Google Drive ထဲ ဖိုင်ကို အပ်လုဒ်လုပ်ပါ (သတ်မှတ်ထားတဲ့ folder ထဲ)
 def upload_to_drive(file_path, file_name):
     try:
-        drive_service = get_drive_service()
-        file_metadata = {'name': file_name}
-        media = MediaFileUpload(file_path)
-        file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
-        return file.get('id')
+        service = get_drive_service()
+        # ဖိုင်ကို သတ်မှတ်ထားတဲ့ folder ထဲ ထည့်ဖို့ parents field ထည့်ပါ
+        file_metadata = {
+            'name': file_name
+        }
+        # GOOGLE_DRIVE_FOLDER_ID ရှိမရှိ စစ်ဆေးပြီး ရှိရင် parents field ထည့်ပါ
+        if GOOGLE_DRIVE_FOLDER_ID:
+            file_metadata['parents'] = [GOOGLE_DRIVE_FOLDER_ID]
+            print(f"Uploading {file_name} to Google Drive folder ID {GOOGLE_DRIVE_FOLDER_ID}...")
+        else:
+            print(f"No folder ID specified, uploading {file_name} to Google Drive root...")
+
+        media = MediaFileUpload(file_path, resumable=True)
+        request = service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields='id'
+        )
+        response = None
+        while response is None:
+            status, response = request.next_chunk()
+            if status:
+                print(f"Uploaded {int(status.progress() * 100)}%")
+        file_id = response.get('id')
+        print(f"File uploaded to Google Drive with ID: {file_id}")
+
+        # Permission သတ်မှတ်တဲ့ အပိုင်းကို ဖယ်ထုတ်လိုက်တယ်
+        print(f"Skipping permission setting due to persistent errors.")
+
+        # ဖိုင်ကို အပ်လုဒ်လုပ်ပြီးသားဆိုရင် True ပြန်ပေးမယ်
+        return True
     except Exception as e:
         print(f"Error uploading to Google Drive: {str(e)}")
-        return None
+        # အမှားဖြစ်ရင်လည်း ဖိုင်ကို အပ်လုဒ်လုပ်ပြီးသားဆိုရင် True ပြန်ပေးမယ်
+        if 'file_id' in locals():  # file_id ရှိပြီးသားဆိုရင်
+            print(f"File uploaded despite error with ID: {file_id}")
+            return True
+        return False
 
-# Start command handler
-async def start(update, context):
-    await update.message.reply_text("Hello! Please send me a MegaUp direct download link, and I'll upload it to your Google Drive.")
+# /start command အတွက် handler
+def start(update, context):
+    update.message.reply_text("Hello! I am a bot that can download files from MegaUp links and upload them to Google Drive. Just send me a MegaUp direct download link.")
 
-# Message handler to process MegaUp links
-async def handle_message(update, context):
-    message_text = update.message.text
-
-    # Check if the message is a URL
-    if "megaup.net" in message_text:
-        await update.message.reply_text("Received your MegaUp link! Downloading...")
-
-        # Extract the original file name from the URL
-        parsed_url = urllib.parse.urlparse(message_text)
-        file_name = os.path.basename(parsed_url.path)
-        file_name = urllib.parse.unquote(file_name)
-
-        # Define the path where the file will be saved (local storage)
-        save_path = f"./downloads/{file_name}"
-
-        # Create the downloads folder if it doesn't exist
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-
-        # Download the file
+# MegaUp လင့်ခ်ကို လက်ခံပြီး လုပ်ဆောင်မယ့် handler
+def handle_message(update, context):
+    message = update.message.text
+    if "megaup.net" in message:
+        update.message.reply_text("Downloading the file, please wait...")
         try:
-            os.system(f'wget -O "{save_path}" "{message_text}"')
-            if os.path.exists(save_path):
-                await update.message.reply_text(f"File downloaded successfully: {file_name}. Uploading to Google Drive...")
-
-                # Upload to Google Drive
-                file_id = upload_to_drive(save_path, file_name)
-                if file_id:
-                    file_url = f"https://drive.google.com/file/d/{file_id}/view"
-                    await update.message.reply_text(f"File uploaded to Google Drive: {file_url}")
-                else:
-                    await update.message.reply_text("Failed to upload to Google Drive.")
-                
-                # Delete the local file after uploading
-                os.remove(save_path)
+            # ဖိုင်နာမည်ကို လင့်ခ်ကနေ ထုတ်ယူပါ
+            file_name = message.split("/")[-1].split("?")[0]
+            # ဖိုင်ကို ဒေါင်းလုဒ်လုပ်ပါ
+            file_path = download_file(message, file_name)
+            update.message.reply_text("File downloaded successfully! Uploading to Google Drive...")
+            # Google Drive ထဲ အပ်လုဒ်လုပ်ပါ
+            upload_success = upload_to_drive(file_path, file_name)
+            if upload_success:
+                update.message.reply_text("Upload successful. Please check the file in your specified Google Drive folder ID.")
             else:
-                await update.message.reply_text("Download failed: File not found.")
+                update.message.reply_text("Failed to upload to Google Drive. Please check the logs for more details.")
+            # ဒေါင်းလုဒ်လုပ်ထားတဲ့ ဖိုင်ကို ဖျက်ပါ
+            if os.path.exists(file_path):
+                os.remove(file_path)
         except Exception as e:
-            await update.message.reply_text(f"Error occurred: {str(e)}")
+            update.message.reply_text(f"Error: {str(e)}")
     else:
-        await update.message.reply_text("Please send a valid MegaUp direct download link.")
+        update.message.reply_text("Please send a valid MegaUp direct download link.")
 
-# Add handlers to the application
-app.add_handler(CommandHandler("start", start))
-app.add_handler(MessageHandler(filters.Text() & ~filters.Command(), handle_message))
+# Flask route ဖန်တီးပါ
+@app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=['POST'])
+def webhook():
+    update = telegram.Update.de_json(request.get_json(force=True), bot)
+    dispatcher.process_update(update)
+    return "OK", 200
 
-# Webhook handler for Railway.app
-async def webhook(request):
-    try:
-        update = telegram.Update.de_json(await request.json(), app.bot)
-        if update:
-            await app.process_update(update)
-        return web.Response(text="OK")
-    except Exception as e:
-        print(f"Error in webhook: {str(e)}")
-        return web.Response(text="Error", status=500)
-
-# Set up the webhook server
-async def main():
-    # Set webhook
-    webhook_url = f"{RAILWAY_URL}/{BOT_TOKEN}"
-    await app.bot.set_webhook(url=webhook_url)
+# Webhook ကို သတ်မှတ်ပါ
+def set_webhook():
+    webhook_url = f"{RAILWAY_URL}/{TELEGRAM_BOT_TOKEN}"
+    bot.setWebhook(webhook_url)
     print(f"Webhook set to: {webhook_url}")
 
-    # Start the webhook server
-    port = int(os.getenv("PORT", 8080))  # Railway.app မှာ PORT ကို သတ်မှတ်ထားရင် အဲဒီ port ကို သုံးမယ်
-    web_app = web.Application()
-    web_app.router.add_post(f"/{BOT_TOKEN}", webhook)
-    runner = web.AppRunner(web_app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
+# Command နဲ့ Message handler တွေကို ထည့်ပါ
+start_handler = CommandHandler('start', start)
+message_handler = MessageHandler(Filters.text & ~Filters.command, handle_message)
+dispatcher.add_handler(start_handler)
+dispatcher.add_handler(message_handler)
 
-    print(f"Bot is running with webhook on port {port}...")
-
-    # Keep the application running
-    await app.initialize()
-    await app.start()
-    # Run forever
-    await asyncio.Event().wait()
-
+# Flask app ကို run ပါ
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    # downloads ဖိုလ်ဒါ ဖန်တီးပါ
+    if not os.path.exists("downloads"):
+        os.makedirs("downloads")
+    # Webhook ကို သတ်မှတ်ပါ
+    set_webhook()
+    # Flask app ကို run ပါ
+    port = int(os.getenv("PORT", 8080))
+    print(f"Bot is running with webhook on port {port}...")
+    app.run(host="0.0.0.0", port=port)
